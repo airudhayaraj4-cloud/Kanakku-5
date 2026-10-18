@@ -1,0 +1,198 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project around index.html
+        run: |
+          set -e
+          test -f index.html || { echo "index.html missing"; exit 1; }
+          mkdir -p app/src/main/assets app/src/main/java/com/karumbu/kanakku app/src/main/res/drawable app/src/main/res/values
+          cp index.html app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOT'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "KarumbuKanakku"
+          include ':app'
+          EOT
+
+          cat > build.gradle <<'EOT'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOT
+
+          cat > app/build.gradle <<'EOT'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.karumbu.kanakku'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.karumbu.kanakku'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOT
+
+          cat > app/src/main/AndroidManifest.xml <<'EOT'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Karumbu Kanakku"
+                  android:icon="@drawable/ic_launcher"
+                  android:allowBackup="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOT
+
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOT'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#2E7D32" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M50,24h8v60h-8z" />
+              <path android:fillColor="#C5E1A5" android:pathData="M54,40 L80,26 L80,36 L54,52z" />
+              <path android:fillColor="#C5E1A5" android:pathData="M54,62 L28,48 L28,58 L54,74z" />
+          </vector>
+          EOT
+
+          cat > app/src/main/java/com/karumbu/kanakku/MainActivity.java <<'EOT'
+          package com.karumbu.kanakku;
+
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+
+              public class Bridge {
+                  @JavascriptInterface
+                  public String saveFile(String name, String b64, String mime) {
+                      try {
+                          byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                          if (Build.VERSION.SDK_INT >= 29) {
+                              ContentValues v = new ContentValues();
+                              v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                              v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                              v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                              Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                              if (u == null) return "err:insert";
+                              OutputStream o = getContentResolver().openOutputStream(u);
+                              o.write(data);
+                              o.close();
+                              return "ok";
+                          } else {
+                              File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                              if (dir != null) dir.mkdirs();
+                              File f = new File(dir, name);
+                              FileOutputStream o = new FileOutputStream(f);
+                              o.write(data);
+                              o.close();
+                              return "ok:" + f.getAbsolutePath();
+                          }
+                      } catch (Exception e) {
+                          return "err:" + e;
+                      }
+                  }
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(true);
+                  web.addJavascriptInterface(new Bridge(), "Android");
+                  web.setWebViewClient(new WebViewClient());
+                  web.setWebChromeClient(new WebChromeClient());
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) web.goBack();
+                  else super.onBackPressed();
+              }
+          }
+          EOT
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: karumbu-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
